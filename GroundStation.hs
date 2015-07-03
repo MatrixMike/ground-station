@@ -36,8 +36,27 @@ data Packet =
 
 data Transmission = 
       Ack
+    | Exception
     | Telemetry (Quaternion Double)
     deriving (Show)
+
+data Reception = 
+      Ping
+    | Control Double (Quaternion Double)
+    | Gains   Double Double Double Double
+    | Reset
+    deriving (Show)
+
+putDoubleAsFix16 :: Double -> Put
+putDoubleAsFix16 x = putWord32le $ truncate $ x * 65536
+
+serializeR :: Reception -> ByteString
+serializeR x = BSL.toStrict $ runPut (serializeR' x)
+    where
+    serializeR' Ping                                    = putWord8 0
+    serializeR' (Control thr (Quaternion w (V3 x y z))) = putWord8 1 <* putDoubleAsFix16 thr <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
+    serializeR' (Gains w x y z)                         = putWord8 2 <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
+    serializeR' Reset                                   = putWord8 3
 
 buildQuat w x y z = Quaternion w (V3 x y z)
 
@@ -50,10 +69,11 @@ anyFix16 :: P.Parser Double
 anyFix16 = ((/ 65536) . (fromIntegral :: (Int32 -> Double)) . fromIntegral) <$> anyWord32
 
 processRecv :: RecvPacket -> Either String Transmission
-processRecv RecvPacket{..} = parseOnly (ack <|> telemetry) recvData
+processRecv RecvPacket{..} = parseOnly (ack <|> telemetry <|> exc) recvData
     where
     ack       = Ack       <$ word8 0
     telemetry = Telemetry <$ word8 1 <*> (buildQuat <$> anyFix16 <*> anyFix16 <*> anyFix16 <*> anyFix16)
+    exc       = Exception <$ word8 2
 
 doPrint tele oth = for cat $ \dat -> lift $ 
     case dat of
@@ -82,7 +102,7 @@ doIt Options{..} = do
     forkIO $ runEffect $ fromInput inputTelemetry >-> P.map (fmap realToFrac) >-> pipe
 
     let pipe = for cat $ \dat -> lift $ do 
-        let res = BSL.toStrict $ runPut $ X.send (Just 0x5678) (Just 0x00) (Just 0x01) (BS.pack (map (toEnum . fromEnum) dat))
+        let res = BSL.toStrict $ runPut $ X.send (Just 0x5678) (Just 0x00) (Just 0x01) (serializeR Ping) --(BS.pack (map (toEnum . fromEnum) dat))
         putStrLn $ "Transmitting: " ++ dat
         BS.hPut h res
 
