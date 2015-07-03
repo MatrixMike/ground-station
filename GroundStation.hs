@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
 import System.IO
 import Control.Applicative
-import Control.Concurrent
+import Control.Concurrent hiding (yield)
 import System.Random
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -18,12 +18,50 @@ import Data.Bits
 import Data.Word
 import Data.Int
 import Data.Maybe
+import Control.Monad
+import Control.Monad.Trans.Either
 
 import System.Serial
 import Options.Applicative as O
+import Graphics.UI.GLFW as G
 
 import Pipes.Concurrent as PC
 import Graphics.Orientation
+
+joystickPipe :: EitherT String IO (Producer [Double] IO ())
+joystickPipe = do
+    res <- lift G.init
+    unless res $ left "Unable to initialise GLFW"
+
+    lift $ setErrorCallback $ Just $ \err str -> putStrLn (show err) >> putStrLn str
+
+    pres <- lift $ joystickPresent Joystick'1
+    unless pres $ left "No joystick present"
+
+    name <- lift $ getJoystickName Joystick'1
+    name <- maybe (left "Cannot get joystick name") right name
+    lift $ putStrLn $ "Found a: " ++ name
+
+    let loop = do
+        res <- lift $ getJoystickAxes Joystick'1
+        case res of 
+            Nothing -> return ()
+            Just x  -> do
+                yield x
+                lift $ threadDelay 100000
+                loop
+
+    return loop
+
+data ControlInputs = ControlInputs {
+    throttle    :: Double,
+    orientation :: Quaternion Double
+} deriving (Show)
+
+toQuat :: Monad m => Pipe [Double] ControlInputs m r
+toQuat = P.map convert
+    where
+    convert axes = ControlInputs ((1 - axes !! 2) / 2) (axisAngle (V3 0 0 1) (- (axes !! 0)) * axisAngle (V3 1 0 0) (axes !! 1) * axisAngle (V3 0 1 0) (- (axes !! 3)))
 
 data Options = Options {
     device :: Maybe String
@@ -42,8 +80,8 @@ data Transmission =
 
 data Reception = 
       Ping
-    | Control Double (Quaternion Double)
-    | Gains   Double Double Double Double
+    | Control ControlInputs
+    | Gains   Double Double Double Double Double
     | Reset
     deriving (Show)
 
@@ -53,10 +91,10 @@ putDoubleAsFix16 x = putWord32le $ truncate $ x * 65536
 serializeR :: Reception -> ByteString
 serializeR x = BSL.toStrict $ runPut (serializeR' x)
     where
-    serializeR' Ping                                    = putWord8 0
-    serializeR' (Control thr (Quaternion w (V3 x y z))) = putWord8 1 <* putDoubleAsFix16 thr <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
-    serializeR' (Gains w x y z)                         = putWord8 2 <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
-    serializeR' Reset                                   = putWord8 3
+    serializeR' Ping                                                    = putWord8 0
+    serializeR' (Control (ControlInputs thr (Quaternion w (V3 x y z)))) = putWord8 1 <* putDoubleAsFix16 thr <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
+    serializeR' (Gains t w x y z)                                       = putWord8 2 <* putDoubleAsFix16 t   <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
+    serializeR' Reset                                                   = putWord8 3
 
 buildQuat w x y z = Quaternion w (V3 x y z)
 
@@ -84,29 +122,29 @@ doPrint tele oth = for cat $ \dat -> lift $
                 Right Ack              -> void $ atomically $ PC.send oth "ACK"
                 Right (Telemetry quat) -> void $ atomically $ PC.send tele quat
 
-doIt Options{..} = do
+doIt Options{..} = eitherT putStrLn return $ do
     --rnd <- randomIO
     --print $ map (flip showHex "") $ BS.unpack res
 
-    (outputTelemetry, inputTelemetry) <- spawn unbounded
-    (outputOther,     inputOther)     <- spawn unbounded
+    (outputTelemetry, inputTelemetry) <- lift $ spawn unbounded
+    (outputOther,     inputOther)     <- lift $ spawn unbounded
 
-    h <- openSerial (fromMaybe "/dev/ttyUSB0" device) B38400 8 One NoParity NoFlowControl
-    forkIO $ runEffect (B.fromHandle h >-> packetsPipe ((XmitStat <$> txStat) <|> (Receive <$> receive)) >-> doPrint outputTelemetry outputOther)
+    h <- lift $ openSerial (fromMaybe "/dev/ttyUSB0" device) B38400 8 One NoParity NoFlowControl
+    lift $ forkIO $ runEffect (B.fromHandle h >-> packetsPipe ((XmitStat <$> txStat) <|> (Receive <$> receive)) >-> doPrint outputTelemetry outputOther)
 
-    forkIO $ runEffect $ fromInput inputOther     >-> P.print
+    lift $ forkIO $ runEffect $ fromInput inputOther     >-> P.print
 
-    input <- readFile "suzanne.obj"
+    input <- lift $ readFile "suzanne.obj"
     let (verts, norms) = parseObj $ Prelude.lines input
-    Right pipe <- drawOrientation verts norms
-    forkIO $ runEffect $ fromInput inputTelemetry >-> P.map (fmap realToFrac) >-> pipe
+    pipe <- join $ lift $ liftM hoistEither $ drawOrientation verts norms
+    lift $ forkIO $ runEffect $ fromInput inputTelemetry >-> P.map (fmap realToFrac) >-> pipe
 
     let pipe = for cat $ \dat -> lift $ do 
-        let res = BSL.toStrict $ runPut $ X.send (Just 0x5678) (Just 0x00) (Just 0x01) (serializeR Ping) --(BS.pack (map (toEnum . fromEnum) dat))
-        putStrLn $ "Transmitting: " ++ dat
+        let res = BSL.toStrict $ runPut $ X.send (Just 0x5678) (Just 0x00) (Just 0x01) (serializeR $ Control dat) 
         BS.hPut h res
 
-    runEffect $ P.stdinLn >-> pipe
+    jp <- joystickPipe 
+    lift $ runEffect $ jp >-> toQuat >-> pipe
     
 main = execParser opts >>= doIt
     where
