@@ -91,6 +91,8 @@ toQuat = convert (JoyState 0 0 0 16384 16384)
             yield $ Control $ ControlInputs throttle (axisAngle (V3 0 0 1) (yawAccum js) * axisAngle (V3 1 0 0) (roll + rollTrim ns) * axisAngle (V3 0 1 0) (pitch + pitchTrim ns))
             when (gainUp || gainDown || yawGainUp || yawGainDown) $ yield (Gains $ GainSetting 16384 (horizGain ns) (yawGain ns) 0 0)
             when trigger $ yield Reset
+            when arm $ yield Arm 
+            when disarm $ yield Disarm
             convert ns
             where
             throttle    = (1 - axes !! 2) / 2
@@ -104,6 +106,8 @@ toQuat = convert (JoyState 0 0 0 16384 16384)
             yawGainUp   = but  !! 6 == JoystickButtonState'Pressed
             yawGainDown = but  !! 7 == JoystickButtonState'Pressed
             trigger     = but  !! 0 == JoystickButtonState'Pressed
+            arm         = but  !! 1 == JoystickButtonState'Pressed
+            disarm      = but  !! 3 == JoystickButtonState'Pressed
             upd x y inc = if x then inc else if y then (-inc) else 0
 
 data Options = Options {
@@ -126,6 +130,8 @@ data Reception =
     | Control ControlInputs
     | Gains   GainSetting
     | Reset
+    | Arm
+    | Disarm
     deriving (Show)
 
 putDoubleAsFix16 :: Double -> Put
@@ -138,6 +144,8 @@ serializeR x = BSL.toStrict $ runPut (serializeR' x)
     serializeR' (Control (ControlInputs thr (Quaternion w (V3 x y z)))) = putWord8 1 <* putDoubleAsFix16 thr <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
     serializeR' (Gains (GainSetting t w x y z))                         = putWord8 2 <* putDoubleAsFix16 t   <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
     serializeR' Reset                                                   = putWord8 3
+    serializeR' Arm                                                     = putWord8 4
+    serializeR' Disarm                                                  = putWord8 5
 
 buildQuat w x y z = Quaternion w (V3 x y z)
 
