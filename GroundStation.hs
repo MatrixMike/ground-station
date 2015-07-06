@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings, RecordWildCards, GADTs #-}
 import System.IO
 import Control.Applicative
 import Control.Concurrent hiding (yield)
@@ -28,7 +28,7 @@ import Graphics.UI.GLFW as G
 import Pipes.Concurrent as PC
 import Graphics.Orientation
 
-joystickPipe :: EitherT String IO (Producer [Double] IO ())
+joystickPipe :: EitherT String IO (Producer ([Double], [JoystickButtonState]) IO ())
 joystickPipe = do
     res <- lift G.init
     unless res $ left "Unable to initialise GLFW"
@@ -43,13 +43,17 @@ joystickPipe = do
     lift $ putStrLn $ "Found a: " ++ name
 
     let loop = do
-        res <- lift $ getJoystickAxes Joystick'1
+        res <- lift $ getJoystickAxes    Joystick'1
         case res of 
             Nothing -> return ()
             Just x  -> do
-                yield x
-                lift $ threadDelay 100000
-                loop
+                but <- lift $ getJoystickButtons Joystick'1
+                case but of
+                    Nothing -> return ()
+                    Just b -> do
+                        yield (x, b)
+                        lift $ threadDelay 100000
+                        loop
 
     return loop
 
@@ -58,10 +62,49 @@ data ControlInputs = ControlInputs {
     orientation :: Quaternion Double
 } deriving (Show)
 
-toQuat :: Monad m => Pipe [Double] ControlInputs m r
-toQuat = P.map convert
+data GainSetting = GainSetting {
+    throttleP :: Double,
+    horizP    :: Double,
+    yawP      :: Double,
+    horizD    :: Double,
+    yawD      :: Double
+} deriving (Show)
+
+data JoyState = JoyState {
+    yawAccum  :: Double,
+    pitchTrim :: Double,
+    rollTrim  :: Double,
+    horizGain :: Double,
+    yawGain   :: Double
+} deriving (Show)
+
+toQuat :: (Monad m, m ~ IO) => Pipe ([Double], [JoystickButtonState]) Reception m r
+toQuat = convert (JoyState 0 0 0 16384 16384)
     where
-    convert axes = ControlInputs ((1 - axes !! 2) / 2) (axisAngle (V3 0 0 1) (- (axes !! 0)) * axisAngle (V3 1 0 0) (axes !! 1) * axisAngle (V3 0 1 0) (- (axes !! 3)))
+    convert js = do
+        axes <- await
+        fun axes
+        where
+        fun (axes, but) = do
+            lift $ print js
+            let ns = JoyState (yawAccum js + 0.01 * yaw) (pitchTrim js + 0.01 * povPitch) (rollTrim js + 0.01 * povRoll) (horizGain js + upd gainUp gainDown 100) (yawGain js + upd yawGainUp yawGainDown 100)
+            yield $ Control $ ControlInputs throttle (axisAngle (V3 0 0 1) (yawAccum js) * axisAngle (V3 1 0 0) (roll + rollTrim ns) * axisAngle (V3 0 1 0) (pitch + pitchTrim ns))
+            when (gainUp || gainDown || yawGainUp || yawGainDown) $ yield (Gains $ GainSetting 16384 (horizGain ns) (yawGain ns) 0 0)
+            when trigger $ yield Reset
+            convert ns
+            where
+            throttle    = (1 - axes !! 2) / 2
+            pitch       = - (axes !! 1)
+            roll        = axes !! 0
+            yaw         = axes !! 3
+            povPitch    = - (axes !! 6)
+            povRoll     = axes !! 5
+            gainUp      = but  !! 4 == JoystickButtonState'Pressed
+            gainDown    = but  !! 5 == JoystickButtonState'Pressed
+            yawGainUp   = but  !! 6 == JoystickButtonState'Pressed
+            yawGainDown = but  !! 7 == JoystickButtonState'Pressed
+            trigger     = but  !! 0 == JoystickButtonState'Pressed
+            upd x y inc = if x then inc else if y then (-inc) else 0
 
 data Options = Options {
     device :: Maybe String
@@ -81,7 +124,7 @@ data Transmission =
 data Reception = 
       Ping
     | Control ControlInputs
-    | Gains   Double Double Double Double Double
+    | Gains   GainSetting
     | Reset
     deriving (Show)
 
@@ -93,7 +136,7 @@ serializeR x = BSL.toStrict $ runPut (serializeR' x)
     where
     serializeR' Ping                                                    = putWord8 0
     serializeR' (Control (ControlInputs thr (Quaternion w (V3 x y z)))) = putWord8 1 <* putDoubleAsFix16 thr <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
-    serializeR' (Gains t w x y z)                                       = putWord8 2 <* putDoubleAsFix16 t   <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
+    serializeR' (Gains (GainSetting t w x y z))                         = putWord8 2 <* putDoubleAsFix16 t   <* putDoubleAsFix16 w <* putDoubleAsFix16 x <* putDoubleAsFix16 y <* putDoubleAsFix16 z
     serializeR' Reset                                                   = putWord8 3
 
 buildQuat w x y z = Quaternion w (V3 x y z)
@@ -140,7 +183,7 @@ doIt Options{..} = eitherT putStrLn return $ do
     lift $ forkIO $ runEffect $ fromInput inputTelemetry >-> P.map (fmap realToFrac) >-> pipe
 
     let pipe = for cat $ \dat -> lift $ do 
-        let res = BSL.toStrict $ runPut $ X.send (Just 0x5678) (Just 0x00) (Just 0x01) (serializeR $ Control dat) 
+        let res = BSL.toStrict $ runPut $ X.send (Just 0x5678) (Just 0x00) (Just 0x01) (serializeR dat)
         BS.hPut h res
 
     jp <- joystickPipe 
