@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, RecordWildCards, GADTs #-}
+{-# LANGUAGE OverloadedStrings, RecordWildCards, GADTs, TemplateHaskell, ScopedTypeVariables #-}
 import System.IO
 import Control.Applicative
 import Control.Concurrent hiding (yield)
@@ -20,13 +20,60 @@ import Data.Int
 import Data.Maybe
 import Control.Monad
 import Control.Monad.Trans.Either
+import Data.Either.Combinators
 
 import System.Serial
 import Options.Applicative as O
 import Graphics.UI.GLFW as G
+import Data.Yaml
+import Data.Aeson.TH hiding (Options)
 
 import Pipes.Concurrent as PC
 import Graphics.Orientation
+
+data Axes = Axes {
+    throttleA :: Int,
+    pitch     :: Int,
+    roll      :: Int,
+    yaw       :: Int
+} deriving (Show)
+deriveJSON defaultOptions ''Axes
+
+data Trim = Trim {
+    pitchT   :: Int,
+    rollT    :: Int,
+    pitchInc :: Double,
+    rollInc  :: Double
+} deriving (Show)
+deriveJSON defaultOptions ''Trim
+
+data Buttons = Buttons {
+    reset  :: Int,
+    arm    :: Int,
+    disarm :: Int
+} deriving (Show)
+deriveJSON defaultOptions ''Buttons
+
+data Gain = Gain {
+    inc :: Int,
+    dec :: Int,
+    step :: Double
+} deriving (Show)
+deriveJSON defaultOptions ''Gain
+
+data Config = Config {
+    axes      :: Axes,
+    yawStep   :: Double,
+    trim      :: Trim,
+    buttons   :: Buttons,
+    horizGain :: Gain,
+    yawGain   :: Gain
+} deriving (Show)
+deriveJSON defaultOptions ''Config
+
+data Options = Options {
+    device :: Maybe String
+}
 
 joystickPipe :: EitherT String IO (Producer ([Double], [JoystickButtonState]) IO ())
 joystickPipe = do
@@ -71,15 +118,15 @@ data GainSetting = GainSetting {
 } deriving (Show)
 
 data JoyState = JoyState {
-    yawAccum  :: Double,
-    pitchTrim :: Double,
-    rollTrim  :: Double,
-    horizGain :: Double,
-    yawGain   :: Double
+    yawAccum   :: Double,
+    pitchTrim  :: Double,
+    rollTrim   :: Double,
+    horizGainS :: Double,
+    yawGainS   :: Double
 } deriving (Show)
 
-toQuat :: (Monad m, m ~ IO) => Pipe ([Double], [JoystickButtonState]) Reception m r
-toQuat = convert (JoyState 0 0 0 16384 16384)
+toQuat :: (Monad m, m ~ IO) => Config -> Pipe ([Double], [JoystickButtonState]) Reception m r
+toQuat (Config Axes{..} yawStep Trim{..} Buttons{..} horizConfig yawConfig) = convert (JoyState 0 0 0 16384 16384)
     where
     convert js = do
         axes <- await
@@ -87,32 +134,32 @@ toQuat = convert (JoyState 0 0 0 16384 16384)
         where
         fun (axes, but) = do
             lift $ print js
-            let ns = JoyState (yawAccum js + 0.01 * yaw) (pitchTrim js + 0.01 * povPitch) (rollTrim js + 0.01 * povRoll) (horizGain js + upd gainUp gainDown 100) (yawGain js + upd yawGainUp yawGainDown 100)
-            yield $ Control $ ControlInputs throttle (axisAngle (V3 0 0 1) (yawAccum js) * axisAngle (V3 1 0 0) (roll + rollTrim ns) * axisAngle (V3 0 1 0) (pitch + pitchTrim ns))
-            when (gainUp || gainDown || yawGainUp || yawGainDown) $ yield (Gains $ GainSetting 16384 (horizGain ns) (yawGain ns) 0 0)
-            when trigger $ yield Reset
-            when arm $ yield Arm 
-            when disarm $ yield Disarm
+            let ns = JoyState (yawAccum js   + yawStep  * yawVal) 
+                              (pitchTrim js  + pitchInc * povPitch) 
+                              (rollTrim js   + rollInc  * povRoll) 
+                              (horizGainS js + upd gainUp gainDown (step horizConfig)) 
+                              (yawGainS js   + upd yawGainUp yawGainDown (step yawConfig))
+            yield $ Control $ ControlInputs throttleVal (axisAngle (V3 0 0 1) (yawAccum js) * axisAngle (V3 1 0 0) (rollVal + rollTrim ns) * axisAngle (V3 0 1 0) (pitchVal + pitchTrim ns))
+            when (gainUp || gainDown || yawGainUp || yawGainDown) $ yield (Gains $ GainSetting 16384 (horizGainS ns) (yawGainS ns) 0 0)
+            when resetPressed  $ yield Reset
+            when armPressed    $ yield Arm 
+            when disarmPressed $ yield Disarm
             convert ns
             where
-            throttle    = (1 - axes !! 2) / 2
-            pitch       = - (axes !! 1)
-            roll        = axes !! 0
-            yaw         = axes !! 3
-            povPitch    = - (axes !! 6)
-            povRoll     = axes !! 5
-            gainUp      = but  !! 4 == JoystickButtonState'Pressed
-            gainDown    = but  !! 5 == JoystickButtonState'Pressed
-            yawGainUp   = but  !! 6 == JoystickButtonState'Pressed
-            yawGainDown = but  !! 7 == JoystickButtonState'Pressed
-            trigger     = but  !! 0 == JoystickButtonState'Pressed
-            arm         = but  !! 1 == JoystickButtonState'Pressed
-            disarm      = but  !! 3 == JoystickButtonState'Pressed
-            upd x y inc = if x then inc else if y then (-inc) else 0
-
-data Options = Options {
-    device :: Maybe String
-}
+            throttleVal   = (1 - axes !! throttleA) / 2
+            pitchVal      = - (axes !! pitch)
+            rollVal       = axes !! roll
+            yawVal        = axes !! yaw
+            povPitch      = - (axes !! pitchT)
+            povRoll       = axes !! rollT
+            gainUp        = but  !! (inc horizConfig) == JoystickButtonState'Pressed
+            gainDown      = but  !! (dec horizConfig) == JoystickButtonState'Pressed
+            yawGainUp     = but  !! (inc yawConfig)   == JoystickButtonState'Pressed
+            yawGainDown   = but  !! (dec yawConfig)   == JoystickButtonState'Pressed
+            resetPressed  = but  !! reset             == JoystickButtonState'Pressed
+            armPressed    = but  !! arm               == JoystickButtonState'Pressed
+            disarmPressed = but  !! disarm            == JoystickButtonState'Pressed
+            upd x y inc   = if x then inc else if y then (-inc) else 0
 
 data Packet = 
       XmitStat TXStatus
@@ -199,6 +246,9 @@ doIt Options{..} = eitherT putStrLn return $ do
     --rnd <- randomIO
     --print $ map (flip showHex "") $ BS.unpack res
 
+    (config :: Config) <- join $ lift $ liftM hoistEither $ liftM (mapLeft show) $ decodeFileEither "config.yaml" 
+    lift $ print config
+
     lift $ setupGLFW
 
     (outputTelemetry, inputTelemetry) <- lift $ spawn unbounded
@@ -221,7 +271,7 @@ doIt Options{..} = eitherT putStrLn return $ do
     --joyDrawPipe <- join $ lift $ liftM hoistEither $ drawOrientation verts norms
 
     jp <- joystickPipe 
-    lift $ runEffect $ jp >-> toQuat >-> pipe --combine pipe (getOrientations >-> P.map (fmap realToFrac) >-> joyDrawPipe)
+    lift $ runEffect $ jp >-> toQuat config >-> pipe --combine pipe (getOrientations >-> P.map (fmap realToFrac) >-> joyDrawPipe)
     
 main = execParser opts >>= doIt
     where
