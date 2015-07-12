@@ -72,7 +72,8 @@ data Config = Config {
 deriveJSON defaultOptions ''Config
 
 data Options = Options {
-    device :: Maybe String
+    device     :: Maybe String,
+    configFile :: Maybe String
 }
 
 joystickPipe :: EitherT String IO (Producer ([Double], [JoystickButtonState]) IO ())
@@ -246,7 +247,7 @@ doIt Options{..} = eitherT putStrLn return $ do
     --rnd <- randomIO
     --print $ map (flip showHex "") $ BS.unpack res
 
-    (config :: Config) <- join $ lift $ liftM hoistEither $ liftM (mapLeft show) $ decodeFileEither "config.yaml" 
+    (config :: Config) <- join $ lift $ liftM hoistEither $ liftM (mapLeft show) $ decodeFileEither (fromMaybe "config.yaml" configFile)
     lift $ print config
 
     lift $ setupGLFW
@@ -276,5 +277,6 @@ doIt Options{..} = eitherT putStrLn return $ do
 main = execParser opts >>= doIt
     where
     opts   = info (helper <*> parser) (fullDesc <> progDesc "Ground Station" <> O.header "Ground Station")
-    parser = Options <$> optional (strOption (long "device" <> metavar "DEV"))
+    parser = Options <$> optional (strOption (long "device" <> short 'd' <> metavar "DEV"))
+                     <*> optional (strOption (long "config" <> short 'c' <> metavar "FILE"))
 
