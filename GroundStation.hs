@@ -31,6 +31,7 @@ import Data.Aeson.TH hiding (Options)
 import Pipes.Concurrent as PC
 import Graphics.Orientation
 
+-- Configuration file
 data Axes = Axes {
     throttleA :: Int,
     pitch     :: Int,
@@ -71,11 +72,41 @@ data Config = Config {
 } deriving (Show)
 deriveJSON defaultOptions ''Config
 
+-- Command line arguments
 data Options = Options {
     device     :: Maybe String,
     configFile :: Maybe String
 }
 
+-- Serialization utilities
+putDoubleAsFix16 :: Double -> Put
+putDoubleAsFix16 x = putWord32le $ truncate $ x * 65536
+
+-- Parsing utilities
+anyWord32 :: P.Parser Word32
+anyWord32 = func <$> anyWord8 <*> anyWord8 <*> anyWord8 <*> anyWord8
+    where
+    func w x y z = (fromIntegral z `shift` 24) .|. (fromIntegral y `shift` 16) .|. (fromIntegral x `shift` 8) .|. fromIntegral w
+
+anyFix16 :: P.Parser Double
+anyFix16 = ((/ 65536) . (fromIntegral :: (Int32 -> Double)) . fromIntegral) <$> anyWord32
+
+-- Pipe utilities
+fork :: Monad m => Producer a m r -> Producer a (Producer a m) r
+fork prod = runEffect $ hoist (lift . lift) prod >-> fork' 
+    where 
+    fork' = forever $ do
+        res <- await
+        lift $ yield res
+        lift $ lift $ yield res
+
+combine :: Monad m => Consumer a m r -> Consumer a m r -> Consumer a m r
+combine x y = runEffect $ runEffect (fork func >-> hoist (lift . lift) x) >-> hoist lift y
+    where
+    func :: Monad m => Producer a (Consumer a m) r
+    func = forever $ lift await >>= yield
+
+-- Pipe to get joystick state
 joystickPipe :: EitherT String IO (Producer ([Double], [JoystickButtonState]) IO ())
 joystickPipe = do
     res <- lift G.init
@@ -105,6 +136,7 @@ joystickPipe = do
 
     return loop
 
+-- Data types representing a packet to be sent to the quadcopter
 data ControlInputs = ControlInputs {
     throttle    :: Double,
     orientation :: Quaternion Double
@@ -118,6 +150,16 @@ data GainSetting = GainSetting {
     yawD      :: Double
 } deriving (Show)
 
+data Reception = 
+      Ping
+    | Control ControlInputs
+    | Gains   GainSetting
+    | Reset
+    | Arm
+    | Disarm
+    deriving (Show)
+
+-- Processing of Joystick input into quadcopter commands
 data JoyState = JoyState {
     yawAccum   :: Double,
     pitchTrim  :: Double,
@@ -162,35 +204,27 @@ toQuat (Config Axes{..} yawStep Trim{..} Buttons{..} horizConfig yawConfig) = co
             disarmPressed = but  !! disarm            == JoystickButtonState'Pressed
             upd x y inc   = if x then inc else if y then (-inc) else 0
 
+-- Packet types received from the XBee
 data Packet = 
-      XmitStat TXStatus
-    | Receive  RecvPacket
+      XmitStat TXStatus   --Status of the last transmission
+    | Receive  RecvPacket --A packet received from the quadcopter
     deriving (Show)
 
+-- Data received from the quadcopter
 data Transmission = 
       Ack
     | Exception
     | Telemetry (Quaternion Double)
     deriving (Show)
 
-data Reception = 
-      Ping
-    | Control ControlInputs
-    | Gains   GainSetting
-    | Reset
-    | Arm
-    | Disarm
-    deriving (Show)
-
+-- Pipe that only passes on joystick orientation commands
 getOrientations :: Monad m => Pipe Reception (Quaternion Double) m ()
 getOrientations = for cat func
     where
     func (Control (ControlInputs {..})) = yield orientation
     func _                              = return ()
 
-putDoubleAsFix16 :: Double -> Put
-putDoubleAsFix16 x = putWord32le $ truncate $ x * 65536
-
+-- Serialize a packet to be sent to the quadcopter
 serializeR :: Reception -> ByteString
 serializeR x = BSL.toStrict $ runPut (serializeR' x)
     where
@@ -201,23 +235,16 @@ serializeR x = BSL.toStrict $ runPut (serializeR' x)
     serializeR' Arm                                                     = putWord8 4
     serializeR' Disarm                                                  = putWord8 5
 
-buildQuat w x y z = Quaternion w (V3 x y z)
-
-anyWord32 :: P.Parser Word32
-anyWord32 = func <$> anyWord8 <*> anyWord8 <*> anyWord8 <*> anyWord8
-    where
-    func w x y z = (fromIntegral z `shift` 24) .|. (fromIntegral y `shift` 16) .|. (fromIntegral x `shift` 8) .|. fromIntegral w
-
-anyFix16 :: P.Parser Double
-anyFix16 = ((/ 65536) . (fromIntegral :: (Int32 -> Double)) . fromIntegral) <$> anyWord32
-
+-- Parse a packet received from the quadcopter
 processRecv :: RecvPacket -> Either String Transmission
 processRecv RecvPacket{..} = parseOnly (ack <|> telemetry <|> exc) recvData
     where
     ack       = Ack       <$ word8 0
     telemetry = Telemetry <$ word8 1 <*> (buildQuat <$> anyFix16 <*> anyFix16 <*> anyFix16 <*> anyFix16)
     exc       = Exception <$ word8 2
+    buildQuat w x y z = Quaternion w (V3 x y z)
 
+-- Process a packet received from the quadcopter
 doPrint tele oth = for cat $ \dat -> lift $ 
     case dat of
         XmitStat stat -> putStrLn $ "Transmittion status: " ++ show stat
@@ -227,26 +254,7 @@ doPrint tele oth = for cat $ \dat -> lift $
                 Right Ack              -> void $ atomically $ PC.send oth "ACK"
                 Right (Telemetry quat) -> void $ atomically $ PC.send tele quat
 
--- | Fork a pipe 
-fork :: Monad m => Producer a m r -> Producer a (Producer a m) r
-fork prod = runEffect $ hoist (lift . lift) prod >-> fork' 
-    where 
-    fork' = forever $ do
-        res <- await
-        lift $ yield res
-        lift $ lift $ yield res
-
--- | Combine two consumers into a single consumer
-combine :: Monad m => Consumer a m r -> Consumer a m r -> Consumer a m r
-combine x y = runEffect $ runEffect (fork func >-> hoist (lift . lift) x) >-> hoist lift y
-    where
-    func :: Monad m => Producer a (Consumer a m) r
-    func = forever $ lift await >>= yield
-
 doIt Options{..} = eitherT putStrLn return $ do
-    --rnd <- randomIO
-    --print $ map (flip showHex "") $ BS.unpack res
-
     (config :: Config) <- join $ lift $ liftM hoistEither $ liftM (mapLeft show) $ decodeFileEither (fromMaybe "config.yaml" configFile)
     lift $ print config
 
