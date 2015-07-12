@@ -74,8 +74,10 @@ deriveJSON defaultOptions ''Config
 
 -- Command line arguments
 data Options = Options {
-    device     :: Maybe String,
-    configFile :: Maybe String
+    device      :: Maybe String,
+    configFile  :: Maybe String,
+    object      :: Maybe String,
+    xbeeAddress :: Maybe Word16
 }
 
 -- Serialization utilities
@@ -268,13 +270,13 @@ doIt Options{..} = eitherT putStrLn return $ do
 
     lift $ forkIO $ runEffect $ fromInput inputOther >-> P.print
 
-    input <- lift $ readFile "suzanne.obj"
+    input <- lift $ readFile (fromMaybe "suzanne.obj" object)
     let (verts, norms) = parseObj $ Prelude.lines input
     pipe <- join $ lift $ liftM hoistEither $ drawOrientation verts norms
     lift $ forkIO $ runEffect $ fromInput inputTelemetry >-> P.map (fmap realToFrac) >-> pipe
 
     let pipe = for cat $ \dat -> lift $ do 
-        let res = BSL.toStrict $ runPut $ X.send (Just 0x5678) (Just 0x00) (Just 0x01) (serializeR dat)
+        let res = BSL.toStrict $ runPut $ X.send (Just (fromMaybe 0x5678 xbeeAddress)) (Just 0x00) (Just 0x01) (serializeR dat)
         BS.hPut h res
 
     --joyDrawPipe <- join $ lift $ liftM hoistEither $ drawOrientation verts norms
@@ -285,6 +287,8 @@ doIt Options{..} = eitherT putStrLn return $ do
 main = execParser opts >>= doIt
     where
     opts   = info (helper <*> parser) (fullDesc <> progDesc "Ground Station" <> O.header "Ground Station")
-    parser = Options <$> optional (strOption (long "device" <> short 'd' <> metavar "DEV"))
-                     <*> optional (strOption (long "config" <> short 'c' <> metavar "FILE"))
+    parser = Options <$> optional (strOption      (long "device"  <> short 'd' <> metavar "DEV"  <> help "Device file for serial input"))
+                     <*> optional (strOption      (long "config"  <> short 'c' <> metavar "FILE" <> help "YAML config file location"))
+                     <*> optional (strOption      (long "object"  <> short 'o' <> metavar "FILE" <> help "Obj file for oriented object to draw"))
+                     <*> optional (O.option  auto (long "address" <> short 'a' <> metavar "NUM"  <> help "Address of quadcopter xbee"))
 
