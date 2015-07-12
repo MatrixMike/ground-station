@@ -134,6 +134,12 @@ data Reception =
     | Disarm
     deriving (Show)
 
+getOrientations :: Monad m => Pipe Reception (Quaternion Double) m ()
+getOrientations = for cat func
+    where
+    func (Control (ControlInputs {..})) = yield orientation
+    func _                              = return ()
+
 putDoubleAsFix16 :: Double -> Put
 putDoubleAsFix16 x = putWord32le $ truncate $ x * 65536
 
@@ -173,9 +179,27 @@ doPrint tele oth = for cat $ \dat -> lift $
                 Right Ack              -> void $ atomically $ PC.send oth "ACK"
                 Right (Telemetry quat) -> void $ atomically $ PC.send tele quat
 
+-- | Fork a pipe 
+fork :: Monad m => Producer a m r -> Producer a (Producer a m) r
+fork prod = runEffect $ hoist (lift . lift) prod >-> fork' 
+    where 
+    fork' = forever $ do
+        res <- await
+        lift $ yield res
+        lift $ lift $ yield res
+
+-- | Combine two consumers into a single consumer
+combine :: Monad m => Consumer a m r -> Consumer a m r -> Consumer a m r
+combine x y = runEffect $ runEffect (fork func >-> hoist (lift . lift) x) >-> hoist lift y
+    where
+    func :: Monad m => Producer a (Consumer a m) r
+    func = forever $ lift await >>= yield
+
 doIt Options{..} = eitherT putStrLn return $ do
     --rnd <- randomIO
     --print $ map (flip showHex "") $ BS.unpack res
+
+    lift $ setupGLFW
 
     (outputTelemetry, inputTelemetry) <- lift $ spawn unbounded
     (outputOther,     inputOther)     <- lift $ spawn unbounded
@@ -183,7 +207,7 @@ doIt Options{..} = eitherT putStrLn return $ do
     h <- lift $ openSerial (fromMaybe "/dev/ttyUSB0" device) B38400 8 One NoParity NoFlowControl
     lift $ forkIO $ runEffect (B.fromHandle h >-> packetsPipe ((XmitStat <$> txStat) <|> (Receive <$> receive)) >-> doPrint outputTelemetry outputOther)
 
-    lift $ forkIO $ runEffect $ fromInput inputOther     >-> P.print
+    lift $ forkIO $ runEffect $ fromInput inputOther >-> P.print
 
     input <- lift $ readFile "suzanne.obj"
     let (verts, norms) = parseObj $ Prelude.lines input
@@ -194,8 +218,10 @@ doIt Options{..} = eitherT putStrLn return $ do
         let res = BSL.toStrict $ runPut $ X.send (Just 0x5678) (Just 0x00) (Just 0x01) (serializeR dat)
         BS.hPut h res
 
+    --joyDrawPipe <- join $ lift $ liftM hoistEither $ drawOrientation verts norms
+
     jp <- joystickPipe 
-    lift $ runEffect $ jp >-> toQuat >-> pipe
+    lift $ runEffect $ jp >-> toQuat >-> pipe --combine pipe (getOrientations >-> P.map (fmap realToFrac) >-> joyDrawPipe)
     
 main = execParser opts >>= doIt
     where
