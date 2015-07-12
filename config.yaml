@@ -1,0 +1,28 @@
+axes : 
+    throttleA : 2
+    pitch     : 1
+    roll      : 0
+    yaw       : 3
+
+yawStep : 0.01
+
+trim : 
+    pitchT : 6
+    rollT  : 5
+    pitchInc : 0.01
+    rollInc  : 0.01
+
+buttons :
+    reset  : 0
+    arm    : 1
+    disarm : 3
+
+horizGain : 
+    inc : 4
+    dec : 5
+    step : 100
+
+yawGain : 
+    inc : 6
+    dec : 7
+    step : 100
