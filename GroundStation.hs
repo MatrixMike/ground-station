@@ -152,7 +152,7 @@ data GainSetting = GainSetting {
     yawD      :: Double
 } deriving (Show)
 
-data Reception = 
+data ToQuad = 
       Ping
     | Control ControlInputs
     | Gains   GainSetting
@@ -170,8 +170,8 @@ data JoyState = JoyState {
     yawGainS   :: Double
 } deriving (Show)
 
-toQuat :: (Monad m, m ~ IO) => Config -> Pipe ([Double], [JoystickButtonState]) Reception m r
-toQuat (Config Axes{..} yawStep Trim{..} Buttons{..} horizConfig yawConfig) = convert (JoyState 0 0 0 16384 16384)
+processJoystick :: (Monad m, m ~ IO) => Config -> Pipe ([Double], [JoystickButtonState]) ToQuad m r
+processJoystick (Config Axes{..} yawStep Trim{..} Buttons{..} horizConfig yawConfig) = convert (JoyState 0 0 0 16384 16384)
     where
     convert js = do
         axes <- await
@@ -207,27 +207,27 @@ toQuat (Config Axes{..} yawStep Trim{..} Buttons{..} horizConfig yawConfig) = co
             upd x y inc   = if x then inc else if y then (-inc) else 0
 
 -- Packet types received from the XBee
-data Packet = 
+data FromXbee = 
       XmitStat TXStatus   --Status of the last transmission
     | Receive  RecvPacket --A packet received from the quadcopter
     deriving (Show)
 
 -- Data received from the quadcopter
-data Transmission = 
+data FromQuad = 
       Ack
     | Exception
     | Telemetry (Quaternion Double)
     deriving (Show)
 
 -- Pipe that only passes on joystick orientation commands
-getOrientations :: Monad m => Pipe Reception (Quaternion Double) m ()
+getOrientations :: Monad m => Pipe ToQuad (Quaternion Double) m ()
 getOrientations = for cat func
     where
     func (Control (ControlInputs {..})) = yield orientation
     func _                              = return ()
 
 -- Serialize a packet to be sent to the quadcopter
-serializeR :: Reception -> ByteString
+serializeR :: ToQuad -> ByteString
 serializeR x = BSL.toStrict $ runPut (serializeR' x)
     where
     serializeR' Ping                                                    = putWord8 0
@@ -238,7 +238,7 @@ serializeR x = BSL.toStrict $ runPut (serializeR' x)
     serializeR' Disarm                                                  = putWord8 5
 
 -- Parse a packet received from the quadcopter
-processRecv :: RecvPacket -> Either String Transmission
+processRecv :: RecvPacket -> Either String FromQuad
 processRecv RecvPacket{..} = parseOnly (ack <|> telemetry <|> exc) recvData
     where
     ack       = Ack       <$ word8 0
@@ -282,7 +282,7 @@ doIt Options{..} = eitherT putStrLn return $ do
     --joyDrawPipe <- join $ lift $ liftM hoistEither $ drawOrientation verts norms
 
     jp <- joystickPipe 
-    lift $ runEffect $ jp >-> toQuat config >-> pipe --combine pipe (getOrientations >-> P.map (fmap realToFrac) >-> joyDrawPipe)
+    lift $ runEffect $ jp >-> processJoystick config >-> pipe --combine pipe (getOrientations >-> P.map (fmap realToFrac) >-> joyDrawPipe)
     
 main = execParser opts >>= doIt
     where
