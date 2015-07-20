@@ -282,15 +282,12 @@ doIt Options{..} = eitherT putStrLn return $ do
             >-> P.map processRecv >-> processFromQuad >-> P.map (fmap realToFrac) >-> pipe
         )
 
-    --Process the data from te joystick to the quadcopter
-    let pipe = for cat $ \dat -> lift $ do 
-        let res = BSL.toStrict $ runPut $ X.send (Just xbeeAddress) (Just 0x00) (Just 0x01) (serializeR dat)
-        BS.hPut h res
+    --Process the data from the joystick to the quadcopter
+    let serializeToQuad dat = BSL.toStrict $ runPut $ X.send (Just xbeeAddress) (Just 0x00) (Just 0x01) (serializeR dat)
 
     --joyDrawPipe <- join $ lift $ liftM hoistEither $ drawOrientation verts norms
-
     jp <- joystickPipe 
-    lift $ runEffect $ jp >-> processJoystick config >-> pipe --combine pipe (getOrientations >-> P.map (fmap realToFrac) >-> joyDrawPipe)
+    lift $ runEffect $ jp >-> processJoystick config >-> P.map serializeToQuad >-> B.toHandle h --combine pipe (getOrientations >-> P.map (fmap realToFrac) >-> joyDrawPipe)
     
 main = execParser opts >>= doIt
     where
