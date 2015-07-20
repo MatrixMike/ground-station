@@ -21,6 +21,7 @@ import Data.Maybe
 import Control.Monad
 import Control.Monad.Trans.Either
 import Data.Either.Combinators
+import Control.Monad.Trans.Maybe
 
 import System.Serial
 import Options.Applicative as O
@@ -124,19 +125,14 @@ joystickPipe = do
     lift $ putStrLn $ "Found a: " ++ name
 
     let loop = do
-        res <- lift $ getJoystickAxes    Joystick'1
-        case res of 
-            Nothing -> return ()
-            Just x  -> do
-                but <- lift $ getJoystickButtons Joystick'1
-                case but of
-                    Nothing -> return ()
-                    Just b -> do
-                        yield (x, b)
-                        lift $ threadDelay 100000
-                        loop
+            x <- MaybeT $ lift $ getJoystickAxes    Joystick'1
+            b <- MaybeT $ lift $ getJoystickButtons Joystick'1
+            lift $ do
+                yield (x, b)
+                lift $ threadDelay 100000
+            loop
 
-    return loop
+    return $ const () <$> runMaybeT loop
 
 -- Data types representing a packet to be sent to the quadcopter
 data ControlInputs = ControlInputs {
