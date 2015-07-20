@@ -271,9 +271,9 @@ doIt Options{..} = eitherT putStrLn return $ do
     lift $ forkIO $ 
         runEffect ( 
             runEffect (
-                    (runEffect (B.fromHandle h >-> packetsPipe ((XmitStat <$> txStat) <|> (Receive <$> receive)) >-> forkFromXbee)) 
-                    >-> P.print
-                ) 
+                (runEffect (B.fromHandle h >-> packetsPipe ((XmitStat <$> txStat) <|> (Receive <$> receive)) >-> forkFromXbee)) 
+                >-> P.print
+            ) 
             >-> P.map processRecv >-> processFromQuad >-> P.map (fmap realToFrac) >-> pipe
         )
 
