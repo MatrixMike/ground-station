@@ -74,10 +74,10 @@ deriveJSON defaultOptions ''Config
 
 -- Command line arguments
 data Options = Options {
-    device      :: Maybe String,
-    configFile  :: Maybe String,
-    object      :: Maybe String,
-    xbeeAddress :: Maybe Word16
+    device      :: String,
+    configFile  :: String,
+    object      :: String,
+    xbeeAddress :: Word16
 }
 
 -- Serialization utilities
@@ -257,7 +257,7 @@ doPrint tele oth = for cat $ \dat -> lift $
                 Right (Telemetry quat) -> void $ atomically $ PC.send tele quat
 
 doIt Options{..} = eitherT putStrLn return $ do
-    (config :: Config) <- join $ lift $ liftM hoistEither $ liftM (mapLeft show) $ decodeFileEither (fromMaybe "config.yaml" configFile)
+    (config :: Config) <- join $ lift $ liftM hoistEither $ liftM (mapLeft show) $ decodeFileEither configFile
     lift $ print config
 
     lift $ setupGLFW
@@ -265,18 +265,18 @@ doIt Options{..} = eitherT putStrLn return $ do
     (outputTelemetry, inputTelemetry) <- lift $ spawn unbounded
     (outputOther,     inputOther)     <- lift $ spawn unbounded
 
-    h <- lift $ openSerial (fromMaybe "/dev/ttyUSB0" device) B38400 8 One NoParity NoFlowControl
+    h <- lift $ openSerial device B38400 8 One NoParity NoFlowControl
     lift $ forkIO $ runEffect (B.fromHandle h >-> packetsPipe ((XmitStat <$> txStat) <|> (Receive <$> receive)) >-> doPrint outputTelemetry outputOther)
 
     lift $ forkIO $ runEffect $ fromInput inputOther >-> P.print
 
-    input <- lift $ readFile (fromMaybe "suzanne.obj" object)
+    input <- lift $ readFile object
     let (verts, norms) = parseObj $ Prelude.lines input
     pipe <- join $ lift $ liftM hoistEither $ drawOrientation verts norms
     lift $ forkIO $ runEffect $ fromInput inputTelemetry >-> P.map (fmap realToFrac) >-> pipe
 
     let pipe = for cat $ \dat -> lift $ do 
-        let res = BSL.toStrict $ runPut $ X.send (Just (fromMaybe 0x5678 xbeeAddress)) (Just 0x00) (Just 0x01) (serializeR dat)
+        let res = BSL.toStrict $ runPut $ X.send (Just xbeeAddress) (Just 0x00) (Just 0x01) (serializeR dat)
         BS.hPut h res
 
     --joyDrawPipe <- join $ lift $ liftM hoistEither $ drawOrientation verts norms
@@ -287,8 +287,8 @@ doIt Options{..} = eitherT putStrLn return $ do
 main = execParser opts >>= doIt
     where
     opts   = info (helper <*> parser) (fullDesc <> progDesc "Ground Station" <> O.header "Ground Station")
-    parser = Options <$> optional (strOption      (long "device"  <> short 'd' <> metavar "DEV"  <> help "Device file for serial input"))
-                     <*> optional (strOption      (long "config"  <> short 'c' <> metavar "FILE" <> help "YAML config file location"))
-                     <*> optional (strOption      (long "object"  <> short 'o' <> metavar "FILE" <> help "Obj file for oriented object to draw"))
-                     <*> optional (O.option  auto (long "address" <> short 'a' <> metavar "NUM"  <> help "Address of quadcopter xbee"))
+    parser = Options <$> (fromMaybe "/dev/ttyUSB0" <$> optional (strOption      (long "device"  <> short 'd' <> metavar "FILE" <> value "/dec/ttyUSB0"  <> showDefault <> help "Device file for serial input")))
+                     <*> (fromMaybe "config.yaml"  <$> optional (strOption      (long "config"  <> short 'c' <> metavar "FILE" <> value "./config.yaml" <> showDefault <> help "YAML config file location")))
+                     <*> (fromMaybe "suzanne.obj"  <$> optional (strOption      (long "object"  <> short 'o' <> metavar "FILE" <> value "suzanne.obj"   <> showDefault <> help "Obj file for oriented object to draw")))
+                     <*> (fromMaybe 0x5678         <$> optional (O.option  auto (long "address" <> short 'a' <> metavar "NUM"  <> value 0x5678          <> showDefault <> help "Address of quadcopter xbee")))
 
