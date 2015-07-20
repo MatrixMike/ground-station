@@ -247,34 +247,42 @@ processRecv RecvPacket{..} = parseOnly (ack <|> telemetry <|> exc) recvData
     buildQuat w x y z = Quaternion w (V3 x y z)
 
 -- Process a packet received from the quadcopter
-doPrint tele oth = for cat $ \dat -> lift $ 
+forkFromXbee :: Monad m => Consumer FromXbee (Producer TXStatus (Producer RecvPacket m)) a
+forkFromXbee = for cat $ \dat -> lift $ 
     case dat of
-        XmitStat stat -> putStrLn $ "Transmittion status: " ++ show stat
-        Receive  pkt  -> let res = processRecv pkt in 
-            case res of
-                Left err               -> return ()
-                Right Ack              -> void $ atomically $ PC.send oth "ACK"
-                Right (Telemetry quat) -> void $ atomically $ PC.send tele quat
+        XmitStat stat -> yield stat
+        Receive  pkt  -> lift $ yield pkt
+
+processFromQuad :: Pipe (Either String FromQuad) (Quaternion Double) IO a
+processFromQuad = for cat $ \dat -> 
+    case dat of
+        Left err               -> lift $ putStrLn "Error parsing packet from quadcopter"
+        Right Ack              -> lift $ putStrLn "Acknowledgement from quadcopter"
+        Right (Telemetry quat) -> void $ yield quat
 
 doIt Options{..} = eitherT putStrLn return $ do
+    --Setup
     (config :: Config) <- join $ lift $ liftM hoistEither $ liftM (mapLeft show) $ decodeFileEither configFile
     lift $ print config
-
     lift $ setupGLFW
-
-    (outputTelemetry, inputTelemetry) <- lift $ spawn unbounded
-    (outputOther,     inputOther)     <- lift $ spawn unbounded
-
     h <- lift $ openSerial device B38400 8 One NoParity NoFlowControl
-    lift $ forkIO $ runEffect (B.fromHandle h >-> packetsPipe ((XmitStat <$> txStat) <|> (Receive <$> receive)) >-> doPrint outputTelemetry outputOther)
 
-    lift $ forkIO $ runEffect $ fromInput inputOther >-> P.print
-
+    --Create the orientation drawer
     input <- lift $ readFile object
     let (verts, norms) = parseObj $ Prelude.lines input
     pipe <- join $ lift $ liftM hoistEither $ drawOrientation verts norms
-    lift $ forkIO $ runEffect $ fromInput inputTelemetry >-> P.map (fmap realToFrac) >-> pipe
 
+    --Process the data from the quadcopter
+    lift $ forkIO $ 
+        runEffect ( 
+            runEffect (
+                    (runEffect (B.fromHandle h >-> packetsPipe ((XmitStat <$> txStat) <|> (Receive <$> receive)) >-> forkFromXbee)) 
+                    >-> P.print
+                ) 
+            >-> P.map processRecv >-> processFromQuad >-> P.map (fmap realToFrac) >-> pipe
+        )
+
+    --Process the data from te joystick to the quadcopter
     let pipe = for cat $ \dat -> lift $ do 
         let res = BSL.toStrict $ runPut $ X.send (Just xbeeAddress) (Just 0x00) (Just 0x01) (serializeR dat)
         BS.hPut h res
