@@ -29,7 +29,6 @@ import Graphics.UI.GLFW as G
 import Data.Yaml
 import Data.Aeson.TH hiding (Options)
 
-import Pipes.Concurrent as PC
 import Graphics.Orientation
 
 -- Configuration file
