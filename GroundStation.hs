@@ -287,7 +287,7 @@ doIt Options{..} = eitherT putStrLn return $ do
 main = execParser opts >>= doIt
     where
     opts   = info (helper <*> parser) (fullDesc <> progDesc "Ground Station" <> O.header "Ground Station")
-    parser = Options <$> (fromMaybe "/dev/ttyUSB0" <$> optional (strOption      (long "device"  <> short 'd' <> metavar "FILE" <> value "/dec/ttyUSB0"  <> showDefault <> help "Device file for serial input")))
+    parser = Options <$> (fromMaybe "/dev/ttyUSB0" <$> optional (strOption      (long "device"  <> short 'd' <> metavar "FILE" <> value "/dev/ttyUSB0"  <> showDefault <> help "Device file for serial input")))
                      <*> (fromMaybe "config.yaml"  <$> optional (strOption      (long "config"  <> short 'c' <> metavar "FILE" <> value "./config.yaml" <> showDefault <> help "YAML config file location")))
                      <*> (fromMaybe "suzanne.obj"  <$> optional (strOption      (long "object"  <> short 'o' <> metavar "FILE" <> value "suzanne.obj"   <> showDefault <> help "Obj file for oriented object to draw")))
                      <*> (fromMaybe 0x5678         <$> optional (O.option  auto (long "address" <> short 'a' <> metavar "NUM"  <> value 0x5678          <> showDefault <> help "Address of quadcopter xbee")))
