@@ -18,7 +18,7 @@ cabal-version:       >=1.10
 
 executable ground-station
   main-is:             GroundStation.hs
-  -- other-modules:       
+  other-modules:       Config, Joystick, FromQuad, ToQuad
   other-extensions:    OverloadedStrings, RecordWildCards, GADTs, TemplateHaskell, ScopedTypeVariables
   build-depends:       base >=4.8 && <4.9, random >=1.1 && <1.2, bytestring >=0.10 && <0.11, binary >=0.7 && <0.8, pipes >=4.1 && <4.2, pipes-bytestring >=2.1 && <2.2, linear >=1.18 && <1.19, attoparsec >=0.12 && <0.13, either >=4.3 && <4.4, transformers >=0.4 && <0.5, optparse-applicative >=0.11 && <0.12, GLFW-b >=1.4 && <1.5, yaml >=0.8 && <0.9, aeson >=0.8 && <0.9, orientation >=0.1 && <0.2, xbee >=0.1 && <0.2, serial >=0.2 && <0.3
   hs-source-dirs:      hs_sources
